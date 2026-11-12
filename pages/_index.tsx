@@ -88,6 +88,8 @@ export default function HomePage() {
   const [editTone, setEditTone] = useState('Neutral');
   const [selectedCharacter, setSelectedCharacter] = useState('');
   const [characterVoice, setCharacterVoice] = useState('en-US-AriaNeural');
+  const [characterGender, setCharacterGender] = useState<'Male' | 'Female' | 'Disembodied'>('Female');
+  const [characterAgeRange, setCharacterAgeRange] = useState('Adult');
   const [savingCharacter, setSavingCharacter] = useState(false);
   const [playing, setPlaying] = useState(false);
   const [apiError, setApiError] = useState('');
@@ -109,6 +111,10 @@ export default function HomePage() {
   const [adPlaying, setAdPlaying] = useState(false);
   const audioRef = useRef<HTMLAudioElement | null>(null);
   const previewUrlRef = useRef('');
+
+  useEffect(() => {
+    setProfileMenuOpen(false);
+  }, [screen]);
 
   useEffect(() => {
     let mounted = true;
@@ -146,13 +152,13 @@ export default function HomePage() {
       Object.keys(data.canonical_cast || {}).forEach((name) => names.add(name));
       (Array.isArray(data.script) ? data.script : []).forEach((line: any) => { const name = String(line.speaker || ''); if (name) names.add(name); });
     });
-    names.add('Narrator');
     return [...names].sort((a, b) => a.localeCompare(b));
   }, [chaptersSorted]);
   const characterData = useMemo(() => {
     const data = blueprint.canonical_cast?.[selectedCharacter] || blueprint.characters?.[selectedCharacter] || {};
     return { ...data, gender: data.gender || blueprint.cast?.[selectedCharacter] || 'Character', aliases: data.aliases || [selectedCharacter] };
   }, [blueprint, selectedCharacter]);
+  const filteredVoiceModels = characterGender === 'Disembodied' ? voiceModels : voiceModels.filter((item) => item.gender === characterGender);
   const activeVoiceOptions = useMemo(() => getCharacterVoiceOptions(blueprint, activeTrack?.character), [blueprint, activeTrack]);
   const tracks: Track[] = useMemo(() => {
     const lines = Array.isArray(blueprint.script) ? blueprint.script : [];
@@ -165,6 +171,17 @@ export default function HomePage() {
     });
     return built;
   }, [blueprint]);
+
+  useEffect(() => {
+    if (!selectedCharacter) return;
+    const genderValue = String(characterData.gender || '').toLowerCase();
+    const gender = ['Male', 'Female', 'Disembodied'].find((value) => value.toLowerCase() === genderValue);
+    const storedVoice = blueprint.character_voices?.[selectedCharacter] || blueprint.canonical_cast?.[selectedCharacter]?.voice_id;
+    const voiceGender = voiceModels.find((item) => item.id === storedVoice)?.gender || voiceModels.find((item) => item.id === characterVoice)?.gender;
+    const ageRange = characterData.age_range || characterData.ageRange;
+    setCharacterGender((gender || voiceGender || 'Female') as 'Male' | 'Female' | 'Disembodied');
+    setCharacterAgeRange(['Child', 'Teen', 'Adult', 'Elderly'].includes(ageRange) ? ageRange : 'Adult');
+  }, [blueprint, characterData, selectedCharacter]);
 
   const refreshProjects = async (current = session) => {
     if (current) setProjects(await foleyvoxApi.listProjects(current.access_token));
@@ -221,7 +238,7 @@ export default function HomePage() {
           return;
         }
         if (status === 'failed' && !rows.length) throw new Error(result.project?.error_message || 'Manuscript processing failed.');
-        setProgress((value) => Math.min(96, value + 1));
+        setProgress((value) => Math.min(99, value + 1));
         setUploadMessage(status === 'processing' ? 'Analyzing manuscript with Gemini…' : 'Checking chapter production directly in Supabase…');
       } catch (error) {
         console.warn('[FoleyVox] Direct Supabase status check failed; retrying.', error);
@@ -339,13 +356,21 @@ export default function HomePage() {
     if (!session || !selectedCharacter) return;
     setSavingCharacter(true); setApiError('');
     try {
+      const voiceId = characterVoice;
       const updated = await Promise.all(chaptersSorted.map(async (chapter) => {
         const source = chapter.json_blueprint || {};
         const canonical = { ...(source.canonical_cast || {}) };
-        canonical[selectedCharacter] = { ...(canonical[selectedCharacter] || {}), voice_id: characterVoice };
-        const next = { ...source, canonical_cast: canonical, character_voices: { ...(source.character_voices || {}), [selectedCharacter]: characterVoice } };
-        await foleyvoxApi.saveChapterBlueprint(session.access_token, chapter.id, next);
-        return { ...chapter, json_blueprint: next };
+        canonical[selectedCharacter] = { ...(canonical[selectedCharacter] || {}), voice_id: voiceId, gender: characterGender, age_range: characterAgeRange };
+        const next = { ...source, canonical_cast: canonical, character_voices: { ...(source.character_voices || {}), [selectedCharacter]: voiceId } };
+        const savedRows = await foleyvoxApi.saveChapterBlueprint(session.access_token, chapter.id, next);
+        const savedChapter = Array.isArray(savedRows) ? savedRows.find((row) => row.id === chapter.id) : undefined;
+        if (
+          savedChapter?.json_blueprint?.character_voices?.[selectedCharacter] !== voiceId ||
+          savedChapter?.json_blueprint?.canonical_cast?.[selectedCharacter]?.voice_id !== voiceId
+        ) {
+          throw new Error(`Supabase did not persist the selected voice for Chapter ${chapter.chapter_number}.`);
+        }
+        return { ...chapter, json_blueprint: savedChapter.json_blueprint };
       }));
       setChapters(updated);
       if (studioData) setStudioData((current) => current ? { ...current, json_blueprint: updated.find((row) => row.id === current.id)?.json_blueprint || current.json_blueprint } : current);
@@ -444,7 +469,7 @@ export default function HomePage() {
           <div className={styles.progressRing} style={{ background: `conic-gradient(#ffb300 ${progress * 3.6}deg, #3a3021 0deg)` }}><div className={styles.progressInner}><strong>{progress}%</strong><span>COMPLETE</span></div></div>
           <p className={styles.loadingStep}>{uploadMessage}</p><p className={styles.loadingSubstep}><span className={styles.pulseDot} /> Render worker is processing your manuscript…</p>
           <div className={styles.loadingFile}><FileText size={15} /> {fileName}</div>
-          {showForceStudio && <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 12, maxWidth: 440, margin: '24px auto 0', padding: 18, border: '1px solid #76552b', borderRadius: 12, background: 'rgba(35,28,18,.88)' }}><p style={{ margin: 0, color: '#c6b9a7', fontSize: 12, lineHeight: 1.5 }}>Production is taking longer than expected. You can enter the Studio now and check back as chapters finish.</p><Button className={styles.saveButton} onClick={forceEnterStudio}>Taking too long? Click here to force enter Studio.</Button></div>}
+          {showForceStudio && <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 12, maxWidth: 440, margin: '24px auto 0', padding: 18, border: '1px solid #76552b', borderRadius: 12, background: 'rgba(35,28,18,.88)' }}><p style={{ margin: 0, color: '#c6b9a7', fontSize: 12, lineHeight: 1.5 }}>Production is taking longer than expected. You can enter the Studio now and check back as chapters finish.</p><Button className={styles.saveButton} onClick={forceEnterStudio}>Taking too long? Enter Studio while you wait.</Button></div>}
         </div><div className={styles.loadingFoot}><span /> A little magic takes a moment <span /></div>
       </section> : <>
         <header className={styles.topbar}>
@@ -479,14 +504,14 @@ export default function HomePage() {
             <section className={styles.characterDetail}>{selectedCharacter ? <>
               <div className={styles.characterPortrait}><UserRound size={34} /></div><p className={styles.characterEyebrow}>CHARACTER PROFILE</p><h2>{selectedCharacter}</h2>
               <div className={styles.characterStats}><div><small>ROLE / VOICE TYPE</small><strong>{selectedCharacter.toLowerCase() === 'narrator' ? 'Narrator' : characterData.gender}</strong></div><div><small>ALIASES</small><strong>{(Array.isArray(characterData.aliases) ? characterData.aliases : [characterData.aliases || selectedCharacter]).map((alias: any) => String(alias || '').trim()).filter((alias: string, index: number, all: string[]) => alias && alias.toLowerCase() !== selectedCharacter.toLowerCase() && all.findIndex((item) => item.toLowerCase() === alias.toLowerCase()) === index).join(', ') || '—'}</strong></div><div><small>CHAPTER APPEARANCES</small><strong>{(() => { const count = chaptersSorted.filter((row) => (row.json_blueprint?.script || []).some((line: any) => String(line.speaker || '').toLowerCase() === selectedCharacter.toLowerCase())).length; return `${count} ${count === 1 ? 'chapter' : 'chapters'}`; })()}</strong></div></div>
-              <div className={styles.characterVoiceBox}><label>BASE VOICE MODEL</label><Select value={characterVoice} onValueChange={setCharacterVoice}><SelectTrigger><SelectValue /></SelectTrigger><SelectContent>{voiceModels.map((item) => <SelectItem key={item.id} value={item.id}>{item.label}</SelectItem>)}</SelectContent></Select><div className={styles.characterVoiceActions}><Button variant="outline" onClick={async () => { if (!session) return; try { const response = await foleyvoxApi.previewVoice(session.access_token, characterVoice, `Hello. I am ${selectedCharacter}.`); const blob = await response.blob(); const url = URL.createObjectURL(blob); const audio = new Audio(url); audio.onended = () => URL.revokeObjectURL(url); await audio.play(); } catch (error) { setApiError(error instanceof Error ? error.message : 'Voice preview failed.'); } }}><Play size={15} /> Preview Voice</Button><Button className={styles.saveButton} disabled={savingCharacter} onClick={saveCharacterVoice}>{savingCharacter ? 'Saving…' : 'Apply to entire book'}</Button></div><p>Voice assignment is stored on every chapter blueprint. Re-render chapters to hear the updated performance.</p></div>
+              <div className={styles.characterVoiceBox}><label>GENDER</label><Select value={characterGender} onValueChange={(value) => { const gender = value as 'Male' | 'Female' | 'Disembodied'; const models = gender === 'Disembodied' ? voiceModels : voiceModels.filter((item) => item.gender === gender); setCharacterGender(gender); setCharacterVoice((current) => models.some((item) => item.id === current) ? current : models[0]?.id || current); }}><SelectTrigger><SelectValue /></SelectTrigger><SelectContent>{['Male', 'Female', 'Disembodied'].map((gender) => <SelectItem key={gender} value={gender}>{gender}</SelectItem>)}</SelectContent></Select><label>AGE RANGE</label><Select value={characterAgeRange} onValueChange={setCharacterAgeRange}><SelectTrigger><SelectValue /></SelectTrigger><SelectContent>{['Child', 'Teen', 'Adult', 'Elderly'].map((ageRange) => <SelectItem key={ageRange} value={ageRange}>{ageRange}</SelectItem>)}</SelectContent></Select><label>BASE VOICE MODEL</label><Select value={characterVoice} onValueChange={setCharacterVoice}><SelectTrigger><SelectValue /></SelectTrigger><SelectContent>{filteredVoiceModels.map((item) => <SelectItem key={item.id} value={item.id}>{item.label}</SelectItem>)}</SelectContent></Select><div className={styles.characterVoiceActions}><Button variant="outline" onClick={async () => { if (!session) return; try { const response = await foleyvoxApi.previewVoice(session.access_token, characterVoice, `Hello. I am ${selectedCharacter}.`); const blob = await response.blob(); const url = URL.createObjectURL(blob); const audio = new Audio(url); audio.onended = () => URL.revokeObjectURL(url); await audio.play(); } catch (error) { setApiError(error instanceof Error ? error.message : 'Voice preview failed.'); } }}><Play size={15} /> Preview Voice</Button><Button className={styles.saveButton} disabled={savingCharacter} onClick={saveCharacterVoice}>{savingCharacter ? 'Saving…' : 'Apply to entire book'}</Button></div><p>Profile and voice settings are stored on every chapter blueprint. Re-render chapters to hear the updated performance.</p></div>
             </> : <div className={styles.characterEmpty}>Select a character from the cast to review their profile and voice.</div>}</section>
           </div>
         </section></> : <><section className={styles.workspaceBar}><div><small>PROJECT WORKSPACE</small><strong>{fileName.replace(/\.txt$/i, '')}</strong></div><div><button className={styles.workspaceTabActive} onClick={() => setScreen('studio')}><AudioLines size={15} /> Studio</button><button className={styles.workspaceTab} onClick={() => { setSelectedCharacter((current) => current || characters[0] || 'Narrator'); setScreen('characters'); }}><UserRound size={15} /> Characters</button></div><button className={styles.backToProjects} onClick={() => { setScreen('projects'); setNav('Projects'); }}>All Projects</button></section><div className={styles.studioLayout}>
           {studioNotice && <div className={styles.apiError} role="status"><span>{studioNotice}</span><button onClick={() => setStudioNotice('')}>Dismiss</button></div>}
           <aside className={styles.chapterPanel}>
             <div className={styles.panelHeader}><h2>Chapters</h2><span className={styles.chapterCount}>{chaptersSorted.length} {chaptersSorted.length === 1 ? 'chapter' : 'chapters'}</span></div>
-            <div className={styles.chapterList}>{chaptersSorted.map((chapter) => <div key={chapter.id} className={`${styles.chapterItem} ${selectedChapter === chapter.chapter_number ? styles.chapterActive : ''}`}><button className={styles.chapterSelect} onClick={() => setSelectedChapter(chapter.chapter_number)}><span className={styles.chapterNumber}>{String(chapter.chapter_number).padStart(2, '0')}</span><span className={styles.chapterInfo}><strong>{chapter.title || `Chapter ${chapter.chapter_number}`}</strong><small>{statusLabel(chapter.status)}</small></span></button><Button size="sm" variant="outline" className={styles.chapterRenderButton} disabled={renderingChapters.has(chapter.chapter_number) || chapter.status === 'rendering'} onClick={() => { setSelectedChapter(chapter.chapter_number); rerenderChapter(chapter.chapter_number); }}>{renderingChapters.has(chapter.chapter_number) ? <><LoaderCircle size={13} className={styles.spinIcon} /> Rendering…</> : chapter.audio_path || chapter.audio_url || chapter.status === 'ready' ? 'Re-render Chapter' : 'Render Chapter'}</Button></div>)}</div>
+            <div className={styles.chapterList}>{chaptersSorted.map((chapter) => <div key={chapter.id} className={`${styles.chapterItem} ${selectedChapter === chapter.chapter_number ? styles.chapterActive : ''}`}><button className={styles.chapterSelect} onClick={() => setSelectedChapter(chapter.chapter_number)}><span className={styles.chapterNumber}>{String(chapter.chapter_number).padStart(2, '0')}</span><span className={styles.chapterInfo}><strong>{chapter.title || `Chapter ${chapter.chapter_number}`}</strong><small>{statusLabel(chapter.status)}</small></span></button><Button size="sm" variant="outline" className={styles.chapterRenderButton} disabled={renderingChapters.has(chapter.chapter_number) || chapter.status === 'rendering'} onClick={() => { setSelectedChapter(chapter.chapter_number); rerenderChapter(chapter.chapter_number); }}>{renderingChapters.has(chapter.chapter_number) ? <><LoaderCircle size={13} className={styles.spinIcon} /> Rendering…</> : chapter.audio_url ? 'Re-render Chapter' : 'Render Chapter'}</Button></div>)}</div>
             <div className={styles.chapterFooter}><span><Check size={14} /> Live chapter data</span><small>{chaptersSorted.length} {chaptersSorted.length === 1 ? 'chapter' : 'chapters'} analyzed</small></div>
           </aside>
           <section className={styles.timelinePanel}>
